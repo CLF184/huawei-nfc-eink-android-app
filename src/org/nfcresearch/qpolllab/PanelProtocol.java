@@ -11,7 +11,18 @@ import java.util.Map;
 public final class PanelProtocol {
     public static final int WIDTH=552, HEIGHT=768, IMAGE_BYTES=105984;
     public static final int DEFAULT_POLL_MS=500;
-    public static final int MAX_CHARGE_MS=30000, REFRESH_TIMEOUT_MS=90000;
+    public static final int MAX_CHARGE_MS=30000;
+    public static final int DEFAULT_D4_TIMEOUT_MS=8000, MAX_D4_TIMEOUT_MS=30000;
+    public static final int REFRESH_TIMEOUT_MS=90000, MAX_REFRESH_TIMEOUT_MS=120000;
+    private static final int IDLE_OBSERVATION_MS=20000;
+
+    static int extraRefreshBudgetMs(int d4TimeoutMs,int refreshTimeoutMs) {
+        if(d4TimeoutMs<1000||d4TimeoutMs>MAX_D4_TIMEOUT_MS)
+            throw new IllegalArgumentException("D4 应答超时必须为 1–30 秒");
+        if(refreshTimeoutMs<IDLE_OBSERVATION_MS||refreshTimeoutMs>MAX_REFRESH_TIMEOUT_MS)
+            throw new IllegalArgumentException("DE 刷新状态等待必须为 20–120 秒");
+        return Math.max(0,d4TimeoutMs-DEFAULT_D4_TIMEOUT_MS)+Math.max(0,refreshTimeoutMs-REFRESH_TIMEOUT_MS);
+    }
     public static final byte[] D1=hex("00D1000000"), D8=hex("F0D8000005000000000E"), DE=hex("F0DE000001");
     private static final byte[] PIN=hex("00200001055265699919");
     private static final byte[] GEOMETRY=hex("F0C72006000228"), SCAN=hex("00120030FFFFFF");
@@ -146,11 +157,16 @@ public final class PanelProtocol {
         return write(packed,powerMs,pollMs,0);
     }
     public boolean write(byte[] packed,int powerMs,int pollMs,int chargeMs) throws Exception {
+        return write(packed,powerMs,pollMs,chargeMs,DEFAULT_D4_TIMEOUT_MS,REFRESH_TIMEOUT_MS);
+    }
+    public boolean write(byte[] packed,int powerMs,int pollMs,int chargeMs,int d4TimeoutMs,int refreshTimeoutMs) throws Exception {
         if(packed.length!=IMAGE_BYTES)throw new IllegalArgumentException("图像必须为 105984 字节");
         if(pollMs<0||pollMs>500)throw new IllegalArgumentException("忙状态查询间隔必须为 0–500 ms");
         if(chargeMs<0||chargeMs>MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
+        extraRefreshBudgetMs(d4TimeoutMs,refreshTimeoutMs);
         byte[] refresh=d4(powerMs); // Validate every option before any authentication/write.
         control.event("TIMING","忙状态查询间隔="+pollMs+" ms（每次应答后等待）");
+        control.event("TIMING","D4 应答超时="+d4TimeoutMs+" ms；DE 刷新状态等待="+refreshTimeoutMs+" ms");
         if(chargeMs>0){
             control.event("STAGE","charging|发送前充能，请保持贴合");
             control.event("WAIT","charging|"+control.now()+"|"+chargeMs);
@@ -187,8 +203,8 @@ public final class PanelProtocol {
         control.event("STAGE","refreshing|图片已传完，正在启动屏幕刷新");
         control.check();
         control.event("WAIT","power|"+control.now()+"|"+powerMs);
-        requireOk(exchange(refresh,"D4 刷新（上电等待 "+powerMs+" ms）",8000,true),"D4");
-        long started=control.now(),deadline=started+REFRESH_TIMEOUT_MS;
+        requireOk(exchange(refresh,"D4 刷新（上电等待 "+powerMs+" ms）",d4TimeoutMs,true),"D4");
+        long started=control.now(),deadline=started+refreshTimeoutMs;
         boolean busySeen=false;int idle=0;Boolean previous=null;
         control.event("STAGE","polling|保持贴合供能，等待屏幕刷新");
         while(control.now()<deadline) {
@@ -196,7 +212,7 @@ public final class PanelProtocol {
             if(data.length!=1||(data[0]!=0&&data[0]!=1))throw new IllegalArgumentException("DE 没有有效忙状态字节");
             boolean busy=data[0]==1;busySeen|=busy;idle=busy?0:idle+1;
             if(previous==null||previous!=busy){control.event("BUSY",busy?"屏幕报告忙，继续供能":"屏幕报告空闲");previous=busy;}
-            if(!busy&&idle>=3&&(busySeen||control.now()-started>=20000)) {
+            if(!busy&&idle>=3&&(busySeen||control.now()-started>=IDLE_OBSERVATION_MS)) {
                 control.event(busySeen?"REFRESH_DONE":"REFRESH_UNCONFIRMED",busySeen
                         ?"已观察到忙→连续三次空闲，请目视确认画面是否完整"
                         :"连续空闲但未观察到忙，不能确认刷新，请检查实际画面");
@@ -204,6 +220,6 @@ public final class PanelProtocol {
             }
             pause(pollMs);
         }
-        throw new IllegalStateException("刷新状态等待超过 90 秒；未自动重发 D4");
+        throw new IllegalStateException("刷新状态等待超过 "+refreshTimeoutMs/1000+" 秒；未自动重发 D4");
     }
 }

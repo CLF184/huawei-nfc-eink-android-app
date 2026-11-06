@@ -30,7 +30,10 @@ public final class PanelSession {
         }
         final int chargeMs=mode.equals("refresh")?job.optInt("chargeMs",0):0;
         if(chargeMs<0||chargeMs>PanelProtocol.MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
-        final long deadline=SystemClock.elapsedRealtime()+(mode.equals("refresh")?180000+chargeMs:15000);
+        final int d4TimeoutMs=job.optInt("d4TimeoutMs",PanelProtocol.DEFAULT_D4_TIMEOUT_MS);
+        final int refreshTimeoutMs=job.optInt("refreshTimeoutMs",PanelProtocol.REFRESH_TIMEOUT_MS);
+        final long deadline=SystemClock.elapsedRealtime()+(mode.equals("refresh")
+                ?180000+chargeMs+PanelProtocol.extraRefreshBudgetMs(d4TimeoutMs,refreshTimeoutMs):15000);
         PanelProtocol.Control control=new PanelProtocol.Control() {
             public long now(){return SystemClock.elapsedRealtime();}
             public void sleep(long ms)throws Exception{Thread.sleep(ms);}
@@ -63,7 +66,8 @@ public final class PanelSession {
                 catch(java.io.IOException e){events.emit("APDU_FAILED","INS="+ins+"；连接状态="+iso.isConnected()+"；"+e+"；不会自动重试协议操作");throw e;}
             },control);
             if(mode.equals("identity"))protocol.identify();
-            else protocol.write(image,job.getInt("powerMs"),job.optInt("pollMs",PanelProtocol.DEFAULT_POLL_MS),chargeMs);
+            else protocol.write(image,job.getInt("powerMs"),job.optInt("pollMs",PanelProtocol.DEFAULT_POLL_MS),
+                    chargeMs,d4TimeoutMs,refreshTimeoutMs);
         } finally {try{iso.close();}catch(Exception e){events.emit("CLOSE_ERROR","关闭 ISO-DEP："+e);}finally{connection.accept(null);}}
     }
     private static byte[] read(File file,int max)throws Exception {

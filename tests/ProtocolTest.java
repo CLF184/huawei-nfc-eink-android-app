@@ -15,6 +15,7 @@ public final class ProtocolTest {
     static void rejects(Action action,String message)throws Exception{try{action.run();throw new AssertionError("Expected rejection: "+message);}catch(AssertionError e){throw e;}catch(Exception expected){}}
     static final class Fake implements PanelProtocol.Control,PanelProtocol.Transport {
         long time,cancelAt=-1,firstUploadAt=-1;int d3,d4,de,pin,d8,d1,failD3=-1,cancelAtD3=-1,pollMs=500,deLatencyMs,chargeMs,powerMs=2000;
+        int receivedD4TimeoutMs,d4LatencyMs;
         boolean authNeeded,failPin,failD4,noBusy,foreverBusy,malformedBusy,cancel,cancelBeforeD4,cancelWhilePolling;
         byte[] info=INFO;
         ArrayList<String> events=new ArrayList<>();ArrayList<byte[]> uploads=new ArrayList<>();
@@ -29,12 +30,22 @@ public final class ProtocolTest {
                 case 0xD8:d8++;return authNeeded&&pin==0?PanelProtocol.hex("6985"):OK;
                 case 0x20:pin++;eq(PanelProtocol.toHex(cmd).equals("00200001055265699919"),"published PIN APDU");return failPin?PanelProtocol.hex("63C2"):OK;
                 case 0xD3:if(firstUploadAt<0)firstUploadAt=time;d3++;uploads.add(cmd.clone());if(d3==cancelAtD3)cancel=true;return d3==failD3?PanelProtocol.hex("6995"):OK;
-                case 0xD4:d4++;String expected=powerMs==500?"F0D4858000":powerMs==1000?"F0D48A8000":powerMs==2000?"F0D4948000":powerMs==3000?"F0D49E8000":powerMs==4000?"F0D4A88000":"F0D4B28000";eq(PanelProtocol.toHex(cmd).equals(expected),"D4 power timing");eq(events.get(events.size()-1).equals("WAIT|power|"+time+"|"+powerMs),"power timer starts immediately before D4, after upload");return failD4?PanelProtocol.hex("6502"):OK;
+                case 0xD4:
+                    d4++;receivedD4TimeoutMs=timeout;
+                    String expected=powerMs==500?"F0D4858000":powerMs==1000?"F0D48A8000":powerMs==2000?"F0D4948000":powerMs==3000?"F0D49E8000":powerMs==4000?"F0D4A88000":"F0D4B28000";
+                    eq(PanelProtocol.toHex(cmd).equals(expected),"D4 power timing");
+                    eq(events.get(events.size()-1).equals("WAIT|power|"+time+"|"+powerMs),"power timer starts immediately before D4, after upload");
+                    time+=Math.min(timeout,d4LatencyMs);
+                    if(d4LatencyMs>timeout)throw new IOException("D4 timed out");
+                    return failD4?PanelProtocol.hex("6502"):OK;
                 case 0xDE:deTimes.add(time);time+=deLatencyMs;de++;if(malformedBusy)return PanelProtocol.hex("029000");return PanelProtocol.hex((foreverBusy||(!noBusy&&de<=2))?"019000":"009000");
                 default:throw new AssertionError("Unexpected command: "+PanelProtocol.toHex(cmd));
             }
         }
         void run()throws Exception{new PanelProtocol(this,this).write(new byte[PanelProtocol.IMAGE_BYTES],powerMs,pollMs,chargeMs);}
+        void run(int d4TimeoutMs,int refreshTimeoutMs)throws Exception{
+            new PanelProtocol(this,this).write(new byte[PanelProtocol.IMAGE_BYTES],powerMs,pollMs,chargeMs,d4TimeoutMs,refreshTimeoutMs);
+        }
         boolean emitted(String kind){for(String e:events)if(e.startsWith(kind+"|"))return true;return false;}
     }
     static void passed(String label){cases++;System.out.println("PASS "+label);}
@@ -100,6 +111,21 @@ public final class ProtocolTest {
         Fake waiting=new Fake();waiting.pollMs=500;waiting.cancelWhilePolling=true;rejects(waiting::run,"stop during poll wait");eq(waiting.de==1&&waiting.time-waiting.deTimes.get(0)==300,"poll wait remains cancellable within 100ms checks");passed("polling wait does not delay cancellation");
         Fake zeroIdle=new Fake();zeroIdle.pollMs=0;zeroIdle.deLatencyMs=37;zeroIdle.noBusy=true;zeroIdle.run();eq(zeroIdle.emitted("REFRESH_UNCONFIRMED")&&!zeroIdle.emitted("REFRESH_DONE")&&zeroIdle.time>=21000,"zero wait retains 20s minimum observation");passed("zero interval never claims success from idle-only replies");
         Fake zeroStuck=new Fake();zeroStuck.pollMs=0;zeroStuck.deLatencyMs=250;zeroStuck.foreverBusy=true;rejects(zeroStuck::run,"zero interval 90s deadline");eq(zeroStuck.d4==1&&!zeroStuck.emitted("REFRESH_DONE"),"zero wait still has bounded polling");passed("zero interval retains 90s refresh deadline without replay");
+        Fake slowD4=new Fake();slowD4.d4LatencyMs=12000;
+        rejects(slowD4::run,"default timeout rejects a 12s D4 response");
+        eq(slowD4.receivedD4TimeoutMs==8000&&slowD4.d4==1&&slowD4.de==0,"default D4 timeout with no replay");
+        Fake extendedD4=new Fake();extendedD4.d4LatencyMs=12000;extendedD4.run(15000,90000);
+        eq(extendedD4.receivedD4TimeoutMs==15000&&extendedD4.d4==1&&extendedD4.emitted("REFRESH_DONE"),"custom D4 timeout reaches the transport");
+        Fake stuckRefresh=new Fake();stuckRefresh.foreverBusy=true;stuckRefresh.d4LatencyMs=12000;
+        rejects(()->stuckRefresh.run(15000,120000),"custom polling deadline");
+        eq(stuckRefresh.de==240&&stuckRefresh.time-stuckRefresh.deTimes.get(0)==120000&&stuckRefresh.d4==1,
+                "polling budget starts after D4 completes and never replays D4");
+        Fake invalidTimeout=new Fake();rejects(()->invalidTimeout.run(31000,90000),"invalid D4 timeout");
+        rejects(()->invalidTimeout.run(8000,19000),"invalid DE deadline");
+        eq(invalidTimeout.time==0&&invalidTimeout.d1+invalidTimeout.d3+invalidTimeout.d4==0,"invalid timeouts rejected before any APDU");
+        eq(PanelProtocol.extraRefreshBudgetMs(8000,90000)==0&&PanelProtocol.extraRefreshBudgetMs(30000,120000)==52000
+                &&PanelProtocol.extraRefreshBudgetMs(1000,20000)==0,"extra budget only extends upstream limits");
+        passed("custom D4 timeout and DE polling budget preserve defaults and never replay D4");
         Fake zeroCancel=new Fake();zeroCancel.pollMs=0;zeroCancel.deLatencyMs=37;zeroCancel.foreverBusy=true;zeroCancel.cancelWhilePolling=true;rejects(zeroCancel::run,"zero interval cancellation");eq(zeroCancel.de==8&&zeroCancel.d4==1,"zero wait checks cancellation between exchanges");passed("zero interval remains cancellable between DE exchanges");
         for(int charge:new int[]{0,1000,15000,30000}){
             Fake f=new Fake();f.chargeMs=charge;f.run();

@@ -71,6 +71,11 @@ public final class ShellBridge extends Binder {
   final int uid=android.os.Process.myUid();
   JSONObject settings=new JSONObject(json);String transport=settings.optString("discoveryBackend","system");
   BackendPolicy.validate(uid,mode,transport);
+  long workerBudgetMs=320000L;
+  if(mode.equals("refresh"))workerBudgetMs+=PanelProtocol.extraRefreshBudgetMs(
+      settings.optInt("d4TimeoutMs",PanelProtocol.DEFAULT_D4_TIMEOUT_MS),
+      settings.optInt("refreshTimeoutMs",PanelProtocol.REFRESH_TIMEOUT_MS));
+  final long workerTimeoutMs=workerBudgetMs;
   // Only Q-Poll sessions may opt into the native backend. Inspection/standard A never inject.
   if(!BackendPolicy.needsQPoll(mode))transport="system";
   log("QP|BRIDGE_STATE|启动身份 UID="+uid+"；worker UID="+BackendPolicy.workerUid(uid,legacyRoot)+"；模式="+(legacyRoot?"Root直连（旧版）":streamLogs?"Shizuku进程兼容":"Shizuku用户服务")+"；寻卡后端="+transport);
@@ -92,7 +97,7 @@ public final class ShellBridge extends Binder {
    }
    java.util.List<String> command=BackendPolicy.workerCommand(uid,apk,mode,seconds,mark.toString(),"/data/local/tmp/qpolllab-worker.lock",job.toString(),transport,legacyRoot);
    ProcessBuilder builder=new ProcessBuilder(command).redirectErrorStream(true);builder.environment().put("CLASSPATH",apk);child=builder.start();final java.lang.Process running=child;
-   Thread deadline=new Thread(()->{try{if(!running.waitFor(320,TimeUnit.SECONDS)){mark.createNewFile();if(!running.waitFor(10,TimeUnit.SECONDS))running.destroy();}}catch(Exception ignored){}});deadline.setDaemon(true);deadline.start();
+   Thread deadline=new Thread(()->{try{if(!running.waitFor(workerTimeoutMs,TimeUnit.MILLISECONDS)){mark.createNewFile();if(!running.waitFor(10,TimeUnit.SECONDS))running.destroy();}}catch(Exception ignored){}});deadline.setDaemon(true);deadline.start();
    try(BufferedReader in=new BufferedReader(new InputStreamReader(child.getInputStream(),"UTF-8"))){String line;while((line=in.readLine())!=null){
     log(line);
     if(hook!=null&&line.startsWith("QP|HOOK_RESTORE_REQUEST|")){

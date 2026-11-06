@@ -43,6 +43,8 @@ public final class MainActivity extends Activity {
     private long powerDeadline;
     private Button rotateImage,cropImage,restoreImage;
     private Spinner duration,fit,power,poll,blocks,panelType,charge;
+    private int d4TimeoutMs=PanelProtocol.DEFAULT_D4_TIMEOUT_MS;
+    private int refreshTimeoutMs=PanelProtocol.REFRESH_TIMEOUT_MS;
     private CheckBox dither,binary;
     private SeekBar threshold;
     private Bitmap source,originalSource;
@@ -281,7 +283,16 @@ public final class MainActivity extends Activity {
         power.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onItemSelected(AdapterView<?> p,View v,int pos,long id){getSharedPreferences("refresh-settings",MODE_PRIVATE).edit().putInt("powerMs",powerTimes[pos]).apply();}public void onNothingSelected(AdapterView<?> p){}});
         section(parameters,"状态查询间隔");poll=spinner(new String[]{"0 ms · 连续查询","10 ms","20 ms","50 ms","100 ms","200 ms","300 ms","400 ms","500 ms（默认）"});int savedPoll=getSharedPreferences("refresh-settings",MODE_PRIVATE).getInt("pollMs",PanelProtocol.DEFAULT_POLL_MS),selectedPoll=pollTimes.length-1;for(int i=0;i<pollTimes.length;i++)if(pollTimes[i]==savedPoll)selectedPoll=i;poll.setSelection(selectedPoll);parameters.addView(poll);
         poll.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onItemSelected(AdapterView<?> p,View v,int pos,long id){getSharedPreferences("refresh-settings",MODE_PRIVATE).edit().putInt("pollMs",pollTimes[pos]).apply();}public void onNothingSelected(AdapterView<?> p){}});
-        parameters.addView(text("0 ms 为收到应答后立即查询，实际频率取决于通信耗时。",12,0xff68766e));parameters.addView(action("恢复默认发送参数",v->{charge.setSelection(0);power.setSelection(2);poll.setSelection(pollTimes.length-1);}));
+        parameters.addView(text("0 ms 为收到应答后立即查询，实际频率取决于通信耗时。",12,0xff68766e));
+        android.content.SharedPreferences timing=getSharedPreferences("refresh-settings",MODE_PRIVATE);
+        d4TimeoutMs=timing.getInt("d4TimeoutMs",PanelProtocol.DEFAULT_D4_TIMEOUT_MS);
+        refreshTimeoutMs=timing.getInt("refreshTimeoutMs",PanelProtocol.REFRESH_TIMEOUT_MS);
+        Button timeouts=action(refreshTimeoutLabel(),v->editRefreshTimeouts((Button)v));
+        parameters.addView(timeouts);
+        parameters.addView(action("恢复默认发送参数",v->{
+            charge.setSelection(0);power.setSelection(2);poll.setSelection(pollTimes.length-1);
+            saveRefreshTimeouts(timeouts,PanelProtocol.DEFAULT_D4_TIMEOUT_MS,PanelProtocol.REFRESH_TIMEOUT_MS);
+        }));
         LinearLayout compatibility=fold(page,"执行方式与兼容实验",false);
         compatibility.addView(text("执行方式 · 启动通道与调用身份",14,0xff52635d));
         launchMode=new BackendChoiceSpinner(this,"选择执行方式");idleControls.add(launchMode);
@@ -622,11 +633,52 @@ public final class MainActivity extends Activity {
             }catch(Exception e){Toast.makeText(this,"裁切失败："+e.getMessage(),Toast.LENGTH_LONG).show();}});
         }catch(Exception e){editingCrop=false;controls();Toast.makeText(this,"无法打开裁切："+e.getMessage(),Toast.LENGTH_LONG).show();}
     }
+    private String refreshTimeoutLabel(){
+        return "刷新超时 · D4 "+d4TimeoutMs/1000+" 秒 / DE "+refreshTimeoutMs/1000+" 秒";
+    }
+    private EditText timeoutInput(LinearLayout content,String label,int milliseconds){
+        content.addView(text(label,14,0xff52635d));
+        EditText input=new EditText(this);
+        input.setSingleLine(true);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(3)});
+        input.setText(Integer.toString(milliseconds/1000));
+        content.addView(input);
+        return input;
+    }
+    private void editRefreshTimeouts(Button button){
+        LinearLayout content=column();
+        content.setPadding(dp(20),dp(8),dp(20),0);
+        EditText d4=timeoutInput(content,"D4 启动刷新应答超时（1–30 秒，默认 8 秒）",d4TimeoutMs);
+        EditText de=timeoutInput(content,"D4 成功后等待 DE 确认（20–120 秒，默认 90 秒）",refreshTimeoutMs);
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("刷新超时").setView(content)
+                .setNegativeButton("取消",null).setPositiveButton("保存",null).show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            try{
+                int d4Ms=Integer.parseInt(d4.getText().toString())*1000;
+                int deMs=Integer.parseInt(de.getText().toString())*1000;
+                PanelProtocol.extraRefreshBudgetMs(d4Ms,deMs);
+                saveRefreshTimeouts(button,d4Ms,deMs);
+                dialog.dismiss();
+            }catch(NumberFormatException e){
+                Toast.makeText(this,"请输入两个整数秒数",Toast.LENGTH_SHORT).show();
+            }catch(IllegalArgumentException e){
+                Toast.makeText(this,e.getMessage(),Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+    private void saveRefreshTimeouts(Button button,int d4Ms,int deMs){
+        d4TimeoutMs=d4Ms;
+        refreshTimeoutMs=deMs;
+        getSharedPreferences("refresh-settings",MODE_PRIVATE).edit()
+                .putInt("d4TimeoutMs",d4Ms).putInt("refreshTimeoutMs",deMs).apply();
+        button.setText(refreshTimeoutLabel());
+    }
     private void confirmRefresh(){
         if(busy||preparing||editingCrop||prepared==null||!checkBeforeSend())return;
         if(prepared.panelType.isEmpty()){Toast.makeText(this,"请先选择屏幕类型 A0、A1 或 A0X",Toast.LENGTH_LONG).show();return;}
         new AlertDialog.Builder(this).setTitle("将当前预览写入墨水屏？")
-            .setMessage("这会替换当前贴合墨水屏的画面。\n\n目标：相同原厂配置的 552×768 四色屏（不限 UID）\n图片："+imageName+"\n"+prepared.settings+"\n发送前充能："+charge.getSelectedItemPosition()+" 秒\n上电等待："+powerTimes[power.getSelectedItemPosition()]+" ms\n忙状态查询间隔："+pollTimes[poll.getSelectedItemPosition()]+" ms\n\n仅贴放要刷新的那块屏。请贴稳，全程保持应用在前台和 NFC 供能，直到页面提示本轮结束。中断可能留下不完整画面。")
+            .setMessage("这会替换当前贴合墨水屏的画面。\n\n目标：相同原厂配置的 552×768 四色屏（不限 UID）\n图片："+imageName+"\n"+prepared.settings+"\n发送前充能："+charge.getSelectedItemPosition()+" 秒\n上电等待："+powerTimes[power.getSelectedItemPosition()]+" ms\n忙状态查询间隔："+pollTimes[poll.getSelectedItemPosition()]+" ms\n"+refreshTimeoutLabel()+"\n\n仅贴放要刷新的那块屏。请贴稳，全程保持应用在前台和 NFC 供能，直到页面提示本轮结束。中断可能留下不完整画面。")
             .setNegativeButton("返回预览",null).setPositiveButton("确认并开始刷新",(d,w)->start("refresh")).show();
     }
     private void start(final String mode){
@@ -647,7 +699,9 @@ public final class MainActivity extends Activity {
         try{
             {JSONObject job=new JSONObject();job.put("discoveryBackend",transport);
                 if(mode.equals("refresh")){byte[] image=prepared.packed.clone();try(FileOutputStream out=new FileOutputStream(imageFile)){out.write(image);}String sha=PanelProtocol.toHex(MessageDigest.getInstance("SHA-256").digest(image));
-                    job.put("panelType",prepared.panelType);job.put("imageFile",imageFile.getAbsolutePath());job.put("sha256",sha);job.put("chargeMs",charge.getSelectedItemPosition()*1000);job.put("powerMs",powerTimes[power.getSelectedItemPosition()]);job.put("pollMs",pollTimes[poll.getSelectedItemPosition()]);append("图片参数："+prepared.settings);append("发送前充能="+charge.getSelectedItemPosition()+" 秒");append("预览快照 SHA-256="+sha);}
+                    job.put("panelType",prepared.panelType);job.put("imageFile",imageFile.getAbsolutePath());job.put("sha256",sha);job.put("chargeMs",charge.getSelectedItemPosition()*1000);job.put("powerMs",powerTimes[power.getSelectedItemPosition()]);job.put("pollMs",pollTimes[poll.getSelectedItemPosition()]);
+                    job.put("d4TimeoutMs",d4TimeoutMs);job.put("refreshTimeoutMs",refreshTimeoutMs);
+                    append("图片参数："+prepared.settings);append("发送前充能="+charge.getSelectedItemPosition()+" 秒");append("预览快照 SHA-256="+sha);}
                 try(FileOutputStream out=new FileOutputStream(jobFile)){out.write(job.toString().getBytes("UTF-8"));}}
         }catch(Exception e){append("准备失败："+e);terminal=true;sessionStage="connecting";showFailure("准备图片与任务失败："+e);imageFile.delete();jobFile.delete();return;}
         if(mode.equals("qtag"))capabilityInfo.setText("Q-Poll：测试中，等待实际寻卡命令与响应…");
