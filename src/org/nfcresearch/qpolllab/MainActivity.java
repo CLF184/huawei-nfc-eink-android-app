@@ -29,7 +29,7 @@ public final class MainActivity extends Activity {
     private final Handler main=new Handler();
     private final ArrayList<View> idleControls=new ArrayList<>();
     private final StringBuilder transcript=new StringBuilder();
-    private final int[] durations={5,10,30,60},powerTimes={500,1000,2000,3000,4000,5000},pollTimes={0,10,20,50,100,200,300,400,500},blockSizes={1,2,4,8,16};
+    private final int[] durations={5,10,30,60,0},powerTimes={500,1000,2000,3000,4000,5000},pollTimes={0,10,20,50,100,200,300,400,500},blockSizes={1,2,4,8,16};
     private TextView state,detail,log,imageInfo,thresholdLabel,chargeTiming,refreshTiming;
     private PixelPreview preview,editPreview;
     private TextView editInfo,failureInfo,deviceFeedback,editorLocked;
@@ -46,6 +46,7 @@ public final class MainActivity extends Activity {
     private int d4TimeoutMs=PanelProtocol.DEFAULT_D4_TIMEOUT_MS;
     private int refreshTimeoutMs=PanelProtocol.REFRESH_TIMEOUT_MS;
     private CheckBox dither,binary;
+    private Switch autoRetry,checkD1EachTime;
     private SeekBar threshold;
     private Bitmap source,originalSource;
     private CropWindow appliedCrop;
@@ -95,7 +96,7 @@ public final class MainActivity extends Activity {
     private long bridgeBindingStarted;
     private final Runnable bridgeTimeout=()->{if(!destroyed&&bridgeBinding){bridgeBinding=false;authorizationInfo.setText("已授权，用户服务启动超时；可选择 Shizuku 进程兼容");append("Shizuku 用户服务超过 10 秒未连接；可手动切换进程兼容，不自动重试 NFC 操作。");}};
     private final Shizuku.UserServiceArgs bridgeArgs=new Shizuku.UserServiceArgs(new android.content.ComponentName("org.nfcresearch.qpolllab","org.nfcresearch.qpolllab.ShellBridge")).tag("nfc-shell").version(33).daemon(false).processNameSuffix("nfc_shell");
-    private final Shizuku.UserServiceArgs halBridgeArgs=new Shizuku.UserServiceArgs(new android.content.ComponentName("org.nfcresearch.qpolllab","org.nfcresearch.qpolllab.RootHalBridge")).tag("nfc-foreground-hal").version(33).daemon(false).processNameSuffix("nfc_hal");
+    private final Shizuku.UserServiceArgs halBridgeArgs=new Shizuku.UserServiceArgs(new android.content.ComponentName("org.nfcresearch.qpolllab","org.nfcresearch.qpolllab.RootHalBridge")).tag("nfc-foreground-hal").version(34).daemon(false).processNameSuffix("nfc_hal");
     private final android.content.ServiceConnection bridgeConnection=new android.content.ServiceConnection(){
         public void onServiceConnected(android.content.ComponentName name,android.os.IBinder binder){
             if(destroyed||controlLaunch()!=0||!currentBridgeName(name))return;
@@ -130,13 +131,17 @@ public final class MainActivity extends Activity {
     }catch(Exception e){bridgeBinding=false;permissionPending=false;authorizationInfo.setText("Shizuku 连接失败，请重试");append("Shizuku 连接失败："+e);}finally{controls();}}
     private boolean scanning,terminal;
     private final SessionFailure failure=new SessionFailure();
+    private SessionRetry sessionRetry;
     private long scanDeadline;
     private String waitPhase="";
     private long waitStarted;
     private int waitTotal;
     private final Runnable tick=new Runnable(){public void run(){
         if(busy&&activeMode.equals("power")&&powerDeadline>0){showPowerStatus();main.postDelayed(this,250);}
-        else if(busy&&scanning){detail.setText("寻找兼容墨水屏 · 最长还剩 "+Math.max(0,(scanDeadline-SystemClock.elapsedRealtime()+999)/1000)+" 秒；保持贴合。");main.postDelayed(this,250);}
+        else if(busy&&scanning){
+            if(scanDeadline==0)detail.setText("首次寻卡 · 一直等待，可随时停止。");
+            else{detail.setText("寻找兼容墨水屏 · 最长还剩 "+Math.max(0,(scanDeadline-SystemClock.elapsedRealtime()+999)/1000)+" 秒；保持贴合。");main.postDelayed(this,250);}
+        }
         else if(busy&&!waitPhase.isEmpty()){
             long elapsed=SystemClock.elapsedRealtime()-waitStarted;
             if(waitPhase.equals("power")&&elapsed>=waitTotal){showWait(waitTotal,true);waitPhase="";}
@@ -212,7 +217,16 @@ public final class MainActivity extends Activity {
         diagnostics.addView(action("检查芯片 / NFC",v->start("inspect")));
         diagnostics.addView(action("只读检查屏幕",v->start("identity")));
         diagnostics.addView(text("只读检查核对屏幕规格与原厂配置，不传图、不刷新。芯片配置、寻卡成功均不能单独证明完整刷新兼容。",12,0xff68766e));
-        duration=spinner(new String[]{"寻卡 5 秒","寻卡 10 秒","寻卡 30 秒","寻卡 60 秒"});duration.setSelection(1);diagnostics.addView(duration);
+        section(diagnostics,"首次寻卡等待时间");
+        android.content.SharedPreferences scanSettings=getSharedPreferences("refresh-settings",MODE_PRIVATE);
+        duration=spinner(new String[]{"5 秒","10 秒（默认）","30 秒","60 秒","一直等待"});
+        duration.setSelection(Math.max(0,Math.min(durations.length-1,scanSettings.getInt("scanWaitOption",1))));
+        duration.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
+            public void onItemSelected(AdapterView<?> p,View v,int pos,long id){scanSettings.edit().putInt("scanWaitOption",pos).apply();}
+            public void onNothingSelected(AdapterView<?> p){}
+        });
+        diagnostics.addView(duration);
+        diagnostics.addView(text("一直等待会在未收到标签时续开寻卡窗口，直到收到首张标签、手动停止或离开应用。",12,0xff68766e));
         diagnostics.addView(action("测试 Q-Poll 能力",v->start("qtag")));diagnostics.addView(action("普通 NFC-A 对照",v->start("standard")));
         section(diagnostics,"NFC 仅供能 · 寻找耦合位置");powerSupply=button("开启 NFC 供能");powerSupply.setOnClickListener(v->{if(busy&&activeMode.equals("power"))requestStop("用户关闭供能");else start("power");});diagnostics.addView(powerSupply);
         powerInfo=text("未开启供能",14,0xff52635d);diagnostics.addView(powerInfo);
@@ -276,7 +290,22 @@ public final class MainActivity extends Activity {
         fit.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onItemSelected(AdapterView<?> p,View v,int pos,long id){prepare();}public void onNothingSelected(AdapterView<?> p){}});
 
         page=pageBodies[2];section(page,"设置");page.addView(text("运行期间参数锁定，修改用于下一次操作。",12,0xff68766e));
+        android.content.SharedPreferences timing=getSharedPreferences("refresh-settings",MODE_PRIVATE);
+        autoRetry=new Switch(this);
+        autoRetry.setText("NFC 操作自动重试");
+        autoRetry.setChecked(timing.getBoolean("autoRetry",false));
+        autoRetry.setOnCheckedChangeListener((v,enabled)->timing.edit().putBoolean("autoRetry",enabled).apply());
+        idleControls.add(autoRetry);
+        page.addView(autoRetry);
+        page.addView(text("适用于发送与检测工具。会话恢复后最多重试一次；已发送 D4 时，只重连原屏查询状态。",12,0xff68766e));
         LinearLayout parameters=fold(page,"发送参数",false);
+        checkD1EachTime=new Switch(this);
+        checkD1EachTime.setText("每次读取 D1");
+        checkD1EachTime.setChecked(timing.getBoolean("checkD1EachTime",true));
+        checkD1EachTime.setOnCheckedChangeListener((v,enabled)->timing.edit().putBoolean("checkD1EachTime",enabled).apply());
+        idleControls.add(checkD1EachTime);
+        parameters.addView(checkD1EachTime);
+        parameters.addView(text("关闭后，同一 UID 使用已校验的扫描方向。首次识别、没有缓存时读取一次；更换驱动配置后可手动只读检查。",12,0xff68766e));
         section(parameters,"发送前充能时间");String[] chargeOptions=new String[31];for(int i=0;i<31;i++)chargeOptions[i]=i+" 秒"+(i==0?"（默认）":"");charge=spinner(chargeOptions);charge.setSelection(Math.max(0,Math.min(30,getSharedPreferences("refresh-settings",MODE_PRIVATE).getInt("chargeSeconds",0))));parameters.addView(charge);
         parameters.addView(text("连接屏幕后先保持贴合充能，再开始检查与传图。",12,0xff68766e));charge.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onItemSelected(AdapterView<?> p,View v,int pos,long id){getSharedPreferences("refresh-settings",MODE_PRIVATE).edit().putInt("chargeSeconds",pos).apply();}public void onNothingSelected(AdapterView<?> p){}});
         section(parameters,"发送后上电等待时间");power=spinner(new String[]{"500 ms","1000 ms","2000 ms（默认）","3000 ms","4000 ms","5000 ms"});int savedPower=getSharedPreferences("refresh-settings",MODE_PRIVATE).getInt("powerMs",2000),selectedPower=2;for(int i=0;i<powerTimes.length;i++)if(powerTimes[i]==savedPower)selectedPower=i;power.setSelection(selectedPower);parameters.addView(power);
@@ -284,7 +313,6 @@ public final class MainActivity extends Activity {
         section(parameters,"状态查询间隔");poll=spinner(new String[]{"0 ms · 连续查询","10 ms","20 ms","50 ms","100 ms","200 ms","300 ms","400 ms","500 ms（默认）"});int savedPoll=getSharedPreferences("refresh-settings",MODE_PRIVATE).getInt("pollMs",PanelProtocol.DEFAULT_POLL_MS),selectedPoll=pollTimes.length-1;for(int i=0;i<pollTimes.length;i++)if(pollTimes[i]==savedPoll)selectedPoll=i;poll.setSelection(selectedPoll);parameters.addView(poll);
         poll.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onItemSelected(AdapterView<?> p,View v,int pos,long id){getSharedPreferences("refresh-settings",MODE_PRIVATE).edit().putInt("pollMs",pollTimes[pos]).apply();}public void onNothingSelected(AdapterView<?> p){}});
         parameters.addView(text("0 ms 为收到应答后立即查询，实际频率取决于通信耗时。",12,0xff68766e));
-        android.content.SharedPreferences timing=getSharedPreferences("refresh-settings",MODE_PRIVATE);
         d4TimeoutMs=timing.getInt("d4TimeoutMs",PanelProtocol.DEFAULT_D4_TIMEOUT_MS);
         refreshTimeoutMs=timing.getInt("refreshTimeoutMs",PanelProtocol.REFRESH_TIMEOUT_MS);
         Button timeouts=action(refreshTimeoutLabel(),v->editRefreshTimeouts((Button)v));
@@ -674,12 +702,29 @@ public final class MainActivity extends Activity {
                 .putInt("d4TimeoutMs",d4Ms).putInt("refreshTimeoutMs",deMs).apply();
         button.setText(refreshTimeoutLabel());
     }
+    private JSONObject cachedScans(){
+        try{return new JSONObject(getSharedPreferences("refresh-settings",MODE_PRIVATE).getString("cachedScans","{}"));}
+        catch(org.json.JSONException e){return new JSONObject();}
+    }
+    private void cacheScan(String message){
+        String[] parts=message.split("\\|",-1);
+        if(parts.length!=2||!parts[0].matches("[0-9A-F]{2,64}")||!parts[1].matches("00|01|"))return;
+        JSONObject scans=cachedScans();
+        try{
+            if(parts[1].isEmpty())scans.remove(parts[0]);
+            else{
+                if(!scans.has(parts[0])&&scans.length()>=32)scans.remove(scans.keys().next());
+                scans.put(parts[0],parts[1]);
+            }
+            getSharedPreferences("refresh-settings",MODE_PRIVATE).edit().putString("cachedScans",scans.toString()).apply();
+        }catch(org.json.JSONException e){append("保存 D1 缓存失败："+e);}
+    }
     private void confirmRefresh(){
         if(busy||preparing||editingCrop||prepared==null||!checkBeforeSend())return;
         if(prepared.panelType.isEmpty()){Toast.makeText(this,"请先选择屏幕类型 A0、A1 或 A0X",Toast.LENGTH_LONG).show();return;}
         new AlertDialog.Builder(this).setTitle("将当前预览写入墨水屏？")
-            .setMessage("这会替换当前贴合墨水屏的画面。\n\n目标：相同原厂配置的 552×768 四色屏（不限 UID）\n图片："+imageName+"\n"+prepared.settings+"\n发送前充能："+charge.getSelectedItemPosition()+" 秒\n上电等待："+powerTimes[power.getSelectedItemPosition()]+" ms\n忙状态查询间隔："+pollTimes[poll.getSelectedItemPosition()]+" ms\n"+refreshTimeoutLabel()+"\n\n仅贴放要刷新的那块屏。请贴稳，全程保持应用在前台和 NFC 供能，直到页面提示本轮结束。中断可能留下不完整画面。")
-            .setNegativeButton("返回预览",null).setPositiveButton("确认并开始刷新",(d,w)->start("refresh")).show();
+            .setMessage("这会替换当前贴合墨水屏的画面。\n\n目标：相同原厂配置的 552×768 四色屏（不限 UID）\n图片："+imageName+"\n"+prepared.settings+"\n发送前充能："+charge.getSelectedItemPosition()+" 秒\n上电等待："+powerTimes[power.getSelectedItemPosition()]+" ms\n忙状态查询间隔："+pollTimes[poll.getSelectedItemPosition()]+" ms\n"+refreshTimeoutLabel()+"\nD1："+(checkD1EachTime.isChecked()?"每次检查":"同 UID 有缓存时跳过")+"\n\n仅贴放要刷新的那块屏。请贴稳，全程保持应用在前台和 NFC 供能，直到页面提示本轮结束。中断可能留下不完整画面。")
+            .setNegativeButton("返回预览",null).setPositiveButton(autoRetry.isChecked()?"确认刷新（允许一次重试）":"确认并开始刷新",(d,w)->start("refresh")).show();
     }
     private void start(final String mode){
         if(busy||preparing||editingCrop||restoringDraft||!resumed)return;
@@ -692,7 +737,9 @@ public final class MainActivity extends Activity {
         if(BackendPolicy.needsQPoll(mode)){String reason=discoveryBlockedReason(launch==3?2:discoveryBackend.getSelectedItemPosition());if(!reason.isEmpty()){append("本轮未启动："+reason);selectPage(2);controls();return;}}
         final String transport=BackendPolicy.needsQPoll(mode)?launch==3?"sn220":BackendOptions.transport(discoveryBackend.getSelectedItemPosition()):"system";
         try{BackendPolicy.validate(manager==2?0:manager==1?Shizuku.getUid():bridgeUid,mode,transport);if(launch==3&&!mode.equals("inspect")&&optionLauncherUid()!=0)throw new SecurityException("前台 HAL 管理需要 Root");}catch(Exception e){append(e.getMessage());terminal=true;showFailure(e.getMessage());return;}
-        final int seconds=mode.equals("power")?BackendPolicy.POWER_SECONDS:durations[duration.getSelectedItemPosition()];
+        int selectedSeconds=durations[duration.getSelectedItemPosition()];
+        boolean waitIndefinitely=selectedSeconds==0&&!mode.equals("inspect")&&!mode.equals("power");
+        final int seconds=mode.equals("power")?BackendPolicy.POWER_SECONDS:selectedSeconds==0?60:selectedSeconds;
         if(mode.equals("refresh")&&(prepared==null||prepared.panelType.isEmpty())){append("请先在设备页选择屏幕类型 A0、A1 或 A0X。");return;}
         final String id=Long.toString(SystemClock.elapsedRealtime());
         final File sessionStop=new File(getFilesDir(),"stop-"+id),jobFile=new File(getFilesDir(),"job-"+id+".json"),imageFile=new File(getFilesDir(),"image-"+id+".bin");
@@ -701,9 +748,17 @@ public final class MainActivity extends Activity {
                 if(mode.equals("refresh")){byte[] image=prepared.packed.clone();try(FileOutputStream out=new FileOutputStream(imageFile)){out.write(image);}String sha=PanelProtocol.toHex(MessageDigest.getInstance("SHA-256").digest(image));
                     job.put("panelType",prepared.panelType);job.put("imageFile",imageFile.getAbsolutePath());job.put("sha256",sha);job.put("chargeMs",charge.getSelectedItemPosition()*1000);job.put("powerMs",powerTimes[power.getSelectedItemPosition()]);job.put("pollMs",pollTimes[poll.getSelectedItemPosition()]);
                     job.put("d4TimeoutMs",d4TimeoutMs);job.put("refreshTimeoutMs",refreshTimeoutMs);
+                    job.put("checkD1EachTime",checkD1EachTime.isChecked());
+                    if(!checkD1EachTime.isChecked())job.put("cachedScans",cachedScans());
                     append("图片参数："+prepared.settings);append("发送前充能="+charge.getSelectedItemPosition()+" 秒");append("预览快照 SHA-256="+sha);}
                 try(FileOutputStream out=new FileOutputStream(jobFile)){out.write(job.toString().getBytes("UTF-8"));}}
         }catch(Exception e){append("准备失败："+e);terminal=true;sessionStage="connecting";showFailure("准备图片与任务失败："+e);imageFile.delete();jobFile.delete();return;}
+        runAttempt(mode,launch,manager,seconds,transport,sessionStop,jobFile,imageFile,
+                new SessionRetry(autoRetry.isChecked(),waitIndefinitely));
+    }
+    private void runAttempt(String mode,int launch,int manager,int seconds,String transport,
+            File sessionStop,File jobFile,File imageFile,SessionRetry retry){
+        retry.beginAttempt();
         if(mode.equals("qtag"))capabilityInfo.setText("Q-Poll：测试中，等待实际寻卡命令与响应…");
         stopFile=sessionStop;activeMode=mode;powerTagActivated=false;powerDeadline=0;busy=true;terminal=false;stopping=false;sessionStage="connecting";lastAdvice="";resultAction.setVisibility(View.GONE);failureInfo.setVisibility(View.GONE);state.setTextColor(0xff176b61);scanning=false;waitPhase="";main.removeCallbacks(tick);failure.clear();controls();progress.setIndeterminate(true);progress.setVisibility(mode.equals("power")?View.GONE:View.VISIBLE);sessionSteps.setVisibility(mode.equals("refresh")?View.VISIBLE:View.GONE);sessionSteps.setText("准备连接 → 屏幕检查 → 图片传输 → 屏幕刷新");
         if(mode.equals("power"))powerInfo.setText("正在开启供能…");
@@ -711,7 +766,9 @@ public final class MainActivity extends Activity {
         chargeTiming.setText(charge.getSelectedItemPosition()==0?"发送前充能 · 0 秒，跳过额外等待":"发送前充能 · "+charge.getSelectedItemPosition()+" 秒，等待连接屏幕");refreshTiming.setText("发送后上电等待 · "+seconds(powerTimes[power.getSelectedItemPosition()])+" 秒，等待传图完成");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         state.setText(manager==2?"等待 Root / NFC":"连接 Shizuku / NFC");detail.setText(launch==3?"前台 App 通信；正在准备 Root HAL 管理通道":launch==2?"请允许 Root 授权；本轮使用旧版 UID 0 通信方式":transport.equals("sn220")?"准备 NXP HAL 兼容层":transport.equals("direct")?"准备直接 Q-Poll":"使用系统 Q-Poll 后端");
-        append("──────── "+mode+" · "+(mode.equals("power")?"仅供能，最长 ":"寻卡 ")+seconds+" 秒 ────────");
+        String wait=retry.waitingForFirstTag()?"首次寻卡 · 一直等待":(mode.equals("power")?"仅供能，最长 ":"寻卡 ")+seconds+" 秒";
+        append("──────── "+mode+" · "+wait+" ────────");
+        sessionRetry=retry;
         final ForegroundNfcSession front=launch==3?new ForegroundNfcSession(this,main,()->resumed&&!destroyed,sessionStop,line->main.post(()->{if(!destroyed)event(line);})):null;
         if(front!=null)foregroundSession=front;
         final android.os.IBinder sessionBinder=bridgeBinder;
@@ -719,12 +776,53 @@ public final class MainActivity extends Activity {
             if(front!=null)front.run(mode,seconds,manager,sessionBinder,jobFile);
             else if(launch==0)runBridge(mode,seconds,jobFile,imageFile,sessionStop);
             else runProcessSession(launch,mode,seconds,jobFile,imageFile,sessionStop);
-        }catch(Exception e){main.post(()->{if(!destroyed){terminal=true;if(!failure.present())showFailure(e.toString());if(mode.equals("power"))powerInfo.setText("供能执行失败，请查看日志");append("执行失败："+e);}});}
-        finally{if(front!=null&&foregroundSession==front){foregroundSession=null;if(destroyed)unbindHalBridge();}sessionStop.delete();jobFile.delete();imageFile.delete();main.post(()->{busy=false;stopping=false;scanning=false;powerDeadline=0;stopWait();activeMode="";progress.setVisibility(View.GONE);chargeTiming.setVisibility(View.GONE);refreshTiming.setVisibility(View.GONE);main.removeCallbacks(tick);if(!destroyed){if(!terminal){terminal=true;showFailure("会话已结束，但未收到结果确认；请查看日志");if(mode.equals("power"))powerInfo.setText("供能会话已结束，请查看日志确认恢复状态");}getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);controls();}});}},"panel-session").start();
+        }catch(Exception e){main.post(()->{
+            if(destroyed)return;
+            if(front==null)retry.backendUnconfirmed();
+            retry.observe("ERROR",e.toString());
+            terminal=true;
+            if(!failure.present())showFailure(e.toString());
+            if(mode.equals("power"))powerInfo.setText("供能执行失败，请查看日志");
+            append("执行失败："+e);
+        });}
+        finally{
+            if(front!=null&&foregroundSession==front){foregroundSession=null;if(destroyed)unbindHalBridge();}
+            main.post(()->finishAttempt(mode,launch,manager,seconds,transport,sessionStop,jobFile,imageFile,retry));
+        }},"panel-session").start();
+    }
+    private void finishAttempt(String mode,int launch,int manager,int seconds,String transport,
+            File sessionStop,File jobFile,File imageFile,SessionRetry retry){
+        SessionRetry.Next next=retry.next(mode,destroyed||stopping||!resumed||sessionStop.exists()||!nfcEnabled());
+        if(next!=SessionRetry.Next.STOP){
+            try{
+                if(next==SessionRetry.Next.RETRY&&mode.equals("refresh")){
+                    JSONObject job=new JSONObject(new String(readFile(jobFile),"UTF-8"));
+                    job.put("retryTargetUid",retry.targetUid());
+                    job.put("retryStatusOnly",retry.statusOnly());
+                    if(!retry.statusOnly()&&!job.optBoolean("checkD1EachTime",true))job.put("cachedScans",cachedScans());
+                    try(FileOutputStream out=new FileOutputStream(jobFile)){out.write(job.toString().getBytes("UTF-8"));}
+                }
+                if(next==SessionRetry.Next.CONTINUE_SEARCH)append("首次寻卡尚未收到标签，继续等待。");
+                else append(retry.statusOnly()?"自动重试 1 / 1：重连原屏，只查询 DE，跳过检查、充能和写入。"
+                        :"自动重试 1 / 1：重新执行当前 NFC 操作。");
+                runAttempt(mode,launch,manager,seconds,transport,sessionStop,jobFile,imageFile,retry);
+                return;
+            }catch(Exception e){terminal=true;showFailure("准备自动重试失败："+e);append("准备自动重试失败："+e);}
+        }
+        if(!destroyed&&!terminal&&stopping)event("QP|CANCELLED|已停止本轮 NFC 操作");
+        sessionStop.delete();jobFile.delete();imageFile.delete();stopFile=null;sessionRetry=null;
+        busy=false;stopping=false;scanning=false;powerDeadline=0;stopWait();activeMode="";
+        progress.setVisibility(View.GONE);chargeTiming.setVisibility(View.GONE);refreshTiming.setVisibility(View.GONE);main.removeCallbacks(tick);
+        if(!destroyed){
+            if(!terminal){terminal=true;showFailure("会话已结束，但未收到结果确认；请查看日志");if(mode.equals("power"))powerInfo.setText("供能会话已结束，请查看日志确认恢复状态");}
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);controls();
+        }
     }
     private void event(String line){
         if(!line.startsWith("QP|")){if(!line.trim().isEmpty())append(line);return;}
         String[] parts=line.split("\\|",3);if(parts.length!=3)return;String kind=parts[1],message=parts[2];
+        if(sessionRetry!=null)sessionRetry.observe(kind,message);
+        if(kind.equals("CACHE_SCAN"))cacheScan(message);
         if(kind.equals("CHIP"))chipInfo.setText("芯片："+message);
         if(kind.equals("CAPABILITY")||kind.equals("QTAG_REJECTED"))capabilityInfo.setText("Q-Poll："+message);
         if(failure.accept(kind,message)){
@@ -738,6 +836,7 @@ public final class MainActivity extends Activity {
         if(stopping&&(kind.equals("START")||kind.equals("STAGE")||kind.equals("PROGRESS")||kind.equals("TAG")||kind.equals("WAIT")||kind.equals("WAIT_DONE")||kind.equals("POWER_TAG")||kind.equals("POWER_LOST"))){append(kind+" · "+message);return;}
         if(kind.equals("START")){
             sessionStage="scanning";String[] fields=message.split(":");scanning=!fields[0].equals("power");scanDeadline=SystemClock.elapsedRealtime()+Integer.parseInt(fields[1])*1000L;
+            if(scanning&&sessionRetry!=null&&sessionRetry.waitingForFirstTag())scanDeadline=0;
             if(fields[0].equals("power")){powerDeadline=scanDeadline;state.setText("NFC 仅供能已开启");}else state.setText(fields[0].equals("standard")?"普通 A 寻卡":"Q-Poll 寻卡中");
             main.removeCallbacks(tick);main.post(tick);if(!resumed)requestStop("页面已离开");
         }
@@ -765,6 +864,10 @@ public final class MainActivity extends Activity {
             state.setText(kind.equals("REFRESH_DONE")?"刷新周期已结束 · 请看屏幕":"刷新结果待确认");detail.setText(message);lastAdvice=message+"\n请检查实物画面，再决定是否重新发送；不会自动重发。";resultAction.setVisibility(View.VISIBLE);
         }
         if(kind.equals("RESULT")){
+            if(sessionRetry!=null&&sessionRetry.waitingForFirstTag()&&SessionRetry.isScanTimeout(message)&&!stopping){
+                scanning=false;main.removeCallbacks(tick);state.setText("正在继续寻卡");detail.setText("尚未收到标签，正在续开寻卡窗口。");
+                append(kind+" · "+message);syncDeviceFeedback();return;
+            }
             terminal=true;state.setText(message.startsWith("D1")?"屏幕规格校验通过":message.startsWith("已收到")?"寻卡完成":message.startsWith("用户")?"已停止":"未收到标签");detail.setText(message);
             lastAdvice=message.startsWith("D1")||message.startsWith("已收到")||message.startsWith("用户")?message:"本轮未收到标签。请检查贴合位置和授权连接，再手动发起检测；不能据此认定手机不兼容。";resultAction.setVisibility(View.VISIBLE);
         }

@@ -18,8 +18,19 @@ public final class PanelSession {
     static void run(Tag tag,String mode,File jobFile,File stopFile,Events events,java.util.function.Consumer<IsoDep> connection) throws Exception {
         if(!BackendPolicy.runsPanelProtocol(mode))throw new IllegalArgumentException("当前模式不允许屏幕协议通信");
         byte[] config=read(jobFile,8192);JSONObject job=new JSONObject(new String(config,"UTF-8"));
+        boolean refresh=mode.equals("refresh"),statusOnly=refresh&&job.optBoolean("retryStatusOnly",false);
+        byte[] tagId=tag.getId();
+        String uid=tagId==null?"":PanelProtocol.toHex(tagId);
+        if(refresh){
+            SessionRetry.requireSameTarget(job.optString("retryTargetUid",""),uid,statusOnly);
+            events.emit("TARGET_UID",uid);
+        }
+        boolean checkD1EachTime=job.optBoolean("checkD1EachTime",true);
+        JSONObject scans=job.optJSONObject("cachedScans");
+        String scan=uid.isEmpty()||scans==null?"":scans.optString(uid,"");
+        Boolean cachedTopDown="01".equals(scan)?Boolean.TRUE:"00".equals(scan)?Boolean.FALSE:null;
         byte[] image=null;
-        if(mode.equals("refresh")) {
+        if(refresh&&!statusOnly) {
             PanelType type=PanelType.parse(job.optString("panelType",""));
             events.emit("PANEL_TYPE","用户选择="+type+"；D1 不识别实体屏幕型号；保留板内驱动");
             File data=new File(job.getString("imageFile")).getCanonicalFile();
@@ -28,11 +39,11 @@ public final class PanelSession {
             if(image.length!=PanelProtocol.IMAGE_BYTES||!PanelProtocol.toHex(MessageDigest.getInstance("SHA-256").digest(image)).equalsIgnoreCase(job.getString("sha256")))
                 throw new IllegalArgumentException("预览与图片快照校验不符，未发送 APDU");
         }
-        final int chargeMs=mode.equals("refresh")?job.optInt("chargeMs",0):0;
+        final int chargeMs=refresh&&!statusOnly?job.optInt("chargeMs",0):0;
         if(chargeMs<0||chargeMs>PanelProtocol.MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
         final int d4TimeoutMs=job.optInt("d4TimeoutMs",PanelProtocol.DEFAULT_D4_TIMEOUT_MS);
         final int refreshTimeoutMs=job.optInt("refreshTimeoutMs",PanelProtocol.REFRESH_TIMEOUT_MS);
-        final long deadline=SystemClock.elapsedRealtime()+(mode.equals("refresh")
+        final long deadline=SystemClock.elapsedRealtime()+(refresh
                 ?180000+chargeMs+PanelProtocol.extraRefreshBudgetMs(d4TimeoutMs,refreshTimeoutMs):15000);
         PanelProtocol.Control control=new PanelProtocol.Control() {
             public long now(){return SystemClock.elapsedRealtime();}
@@ -41,7 +52,10 @@ public final class PanelSession {
                 if(stopFile.exists())throw new InterruptedException("已停止；当前屏幕画面需目视确认");
                 if(now()>deadline)throw new IllegalStateException("本轮通信超过总预算，未重试写入");
             }
-            public void event(String kind,String message){events.emit(kind,message);}
+            public void event(String kind,String message){
+                if(!kind.equals("CACHE_SCAN"))events.emit(kind,message);
+                else if(!uid.isEmpty())events.emit(kind,uid+"|"+message);
+            }
         };
         control.check();IsoDep iso=IsoDep.get(tag);
         if(iso==null)throw new IllegalArgumentException("目标未提供 ISO-DEP，未发送 APDU");
@@ -63,11 +77,15 @@ public final class PanelSession {
                 String ins=String.format("%02X",command[1]&255);
                 if(command[1]!=(byte)0xD3&&command[1]!=(byte)0xDE)events.emit("APDU_BEGIN","INS="+ins+"；超时="+Math.min(timeout,remaining)+" ms");
                 try {return iso.transceive(command);}
-                catch(java.io.IOException e){events.emit("APDU_FAILED","INS="+ins+"；连接状态="+iso.isConnected()+"；"+e+"；不会自动重试协议操作");throw e;}
+                catch(java.io.IOException e){events.emit("APDU_FAILED","INS="+ins+"；连接状态="+iso.isConnected()+"；"+e+"；本次连接不重发 APDU");throw e;}
             },control);
-            if(mode.equals("identity"))protocol.identify();
+            if(mode.equals("identity")){
+                control.event("CACHE_SCAN","");
+                control.event("CACHE_SCAN",protocol.identify().topDown()?"01":"00");
+            }
+            else if(statusOnly)protocol.pollRefresh(job.optInt("pollMs",PanelProtocol.DEFAULT_POLL_MS),refreshTimeoutMs);
             else protocol.write(image,job.getInt("powerMs"),job.optInt("pollMs",PanelProtocol.DEFAULT_POLL_MS),
-                    chargeMs,d4TimeoutMs,refreshTimeoutMs);
+                    chargeMs,d4TimeoutMs,refreshTimeoutMs,checkD1EachTime,cachedTopDown);
         } finally {try{iso.close();}catch(Exception e){events.emit("CLOSE_ERROR","关闭 ISO-DEP："+e);}finally{connection.accept(null);}}
     }
     private static byte[] read(File file,int max)throws Exception {

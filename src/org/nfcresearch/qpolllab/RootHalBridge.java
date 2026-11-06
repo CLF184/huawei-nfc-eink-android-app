@@ -45,7 +45,8 @@ public final class RootHalBridge extends Binder {
             IBinder.DeathRecipient death=()->control(HalLease.CANCEL);
             try{token.linkToDeath(death,0);}catch(RemoteException e){active=false;throw e;}
             new Thread(()->{try{run();}catch(Exception e){log("QP|ERROR|Root HAL："+e);}finally{
-                token.unlinkToDeath(death,0);log("QP|HAL_DONE|Root HAL 会话已结束");active=false;
+                token.unlinkToDeath(death,0);
+                synchronized(lock){log("QP|HAL_DONE|Root HAL 会话已结束");active=false;}
             }},"foreground-root-hal").start();reply.writeNoException();return true;
         }
         if(code==2){synchronized(lock){control(HalLease.HEARTBEAT);reply.writeNoException();reply.writeString(logs.toString());logs.setLength(0);reply.writeInt(active?1:0);}return true;}

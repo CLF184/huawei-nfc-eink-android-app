@@ -126,6 +126,24 @@ public final class ProtocolTest {
         eq(PanelProtocol.extraRefreshBudgetMs(8000,90000)==0&&PanelProtocol.extraRefreshBudgetMs(30000,120000)==52000
                 &&PanelProtocol.extraRefreshBudgetMs(1000,20000)==0,"extra budget only extends upstream limits");
         passed("custom D4 timeout and DE polling budget preserve defaults and never replay D4");
+        Fake statusOnly=new Fake();
+        eq(new PanelProtocol(statusOnly,statusOnly).pollRefresh(500,90000),"read-only retry can observe a fresh busy to idle cycle");
+        eq(statusOnly.d1+statusOnly.d8+statusOnly.pin+statusOnly.d3+statusOnly.d4==0&&statusOnly.de==5,"read-only retry sends only DE");
+        Fake idleAfterReconnect=new Fake();idleAfterReconnect.noBusy=true;
+        eq(!new PanelProtocol(idleAfterReconnect,idleAfterReconnect).pollRefresh(500,90000)
+                &&idleAfterReconnect.emitted("REFRESH_UNCONFIRMED"),"idle after a reconnect cannot prove the old refresh");
+        byte[] scanImage=new byte[PanelProtocol.IMAGE_BYTES];scanImage[0]=0x12;
+        Fake firstD1=new Fake();
+        new PanelProtocol(firstD1,firstD1).write(scanImage,2000,500,0,8000,90000,false,null);
+        eq(firstD1.d1==1&&firstD1.events.contains("CACHE_SCAN|00"),"cache miss reads and validates D1 once");
+        Fake cachedD1=new Fake();
+        new PanelProtocol(cachedD1,cachedD1).write(scanImage,2000,500,0,8000,90000,false,Boolean.TRUE);
+        eq(cachedD1.d1==0&&cachedD1.d8==1&&cachedD1.d4==1
+                &&cachedD1.events.stream().anyMatch(event->event.startsWith("SCAN|采用同一屏幕的缓存扫描方向=01")),"cache hit skips D1 but keeps authentication and refresh");
+        Fake forcedD1=new Fake();
+        new PanelProtocol(forcedD1,forcedD1).write(scanImage,2000,500,0,8000,90000,true,Boolean.TRUE);
+        eq(forcedD1.d1==2&&forcedD1.events.contains("CACHE_SCAN|00"),"enabled D1 check ignores and refreshes cache");
+        passed("read-only refresh recovery and optional D1 caching");
         Fake zeroCancel=new Fake();zeroCancel.pollMs=0;zeroCancel.deLatencyMs=37;zeroCancel.foreverBusy=true;zeroCancel.cancelWhilePolling=true;rejects(zeroCancel::run,"zero interval cancellation");eq(zeroCancel.de==8&&zeroCancel.d4==1,"zero wait checks cancellation between exchanges");passed("zero interval remains cancellable between DE exchanges");
         for(int charge:new int[]{0,1000,15000,30000}){
             Fake f=new Fake();f.chargeMs=charge;f.run();

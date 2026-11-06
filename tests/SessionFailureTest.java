@@ -24,6 +24,65 @@ public final class SessionFailureTest {
         String complete=f.message();
         require(complete.contains("屏幕操作失败")&&complete.contains("SW=6401")&&complete.contains("SW=68CA")&&complete.contains("退出码=1")&&complete.contains("恢复未确认"));
         require(complete.indexOf("SW=6401")==complete.lastIndexOf("SW=6401"));
+        retryCases();
         System.out.println("SessionFailure regression tests passed");
+    }
+    private static void retryCases(){
+        for(String mode:new String[]{"inspect","standard","qtag","identity","refresh","power"}){
+            SessionRetry retry=new SessionRetry(true,false);
+            retry.observe("ERROR","IOException: connection lost");
+            require(retry.next(mode,false)==(mode.equals("inspect")?SessionRetry.Next.RETRY:SessionRetry.Next.STOP));
+            if(!mode.equals("inspect")){
+                retry.observe("RESTORED","");
+                require(retry.next(mode,false)==SessionRetry.Next.RETRY);
+            }
+            retry.beginAttempt();
+            retry.observe("ERROR","IOException: still lost");
+            retry.observe("RESTORED","");
+            require(retry.next(mode,false)==SessionRetry.Next.STOP);
+        }
+        SessionRetry d4=new SessionRetry(true,false);
+        d4.observe("TARGET_UID","0102");
+        d4.observe("APDU_BEGIN","INS=D4；超时=8000 ms");
+        d4.observe("ERROR","TagLostException: Tag was lost");
+        d4.observe("RESTORED","");
+        require(d4.next("refresh",true)==SessionRetry.Next.STOP);
+        require(d4.next("refresh",false)==SessionRetry.Next.RETRY&&d4.statusOnly()&&d4.targetUid().equals("0102"));
+        SessionRetry.requireSameTarget("0102","0102",true);
+        for(String expected:new String[]{"","0102"}){
+            try{SessionRetry.requireSameTarget(expected,"0304",true);throw new AssertionError("different target accepted");}
+            catch(IllegalArgumentException rejected){}
+        }
+        for(String kind:new String[]{"RESTORE_FAILED","CLEANUP_ERROR","CANCELLED","REFRESH_DONE","REFRESH_UNCONFIRMED"}){
+            SessionRetry blocked=new SessionRetry(true,false);
+            blocked.observe("RESTORED","");
+            blocked.observe("ERROR","IOException: lost tag");
+            blocked.observe(kind,"");
+            require(blocked.next("refresh",false)==SessionRetry.Next.STOP);
+        }
+        SessionRetry rejected=new SessionRetry(true,false);
+        rejected.observe("ERROR","IllegalArgumentException: D1 规格不匹配");
+        rejected.observe("RESTORED","");
+        require(rejected.next("refresh",false)==SessionRetry.Next.STOP);
+        SessionRetry lostBackend=new SessionRetry(true,false);
+        lostBackend.observe("RESTORED","");
+        lostBackend.observe("ERROR","IOException: backend disconnected");
+        lostBackend.backendUnconfirmed();
+        require(lostBackend.next("refresh",false)==SessionRetry.Next.STOP);
+        SessionRetry waiting=new SessionRetry(false,true);
+        for(int window=0;window<3;window++){
+            waiting.beginAttempt();
+            waiting.observe("START","refresh:60");
+            waiting.observe("RESULT","本轮超时，未收到标签；不能据此认定硬件不支持");
+            require(waiting.next("refresh",false)==SessionRetry.Next.STOP);
+            waiting.observe("RESTORED","");
+            require(waiting.next("refresh",true)==SessionRetry.Next.STOP);
+            require(waiting.next("refresh",false)==SessionRetry.Next.CONTINUE_SEARCH);
+        }
+        waiting.beginAttempt();
+        waiting.observe("TAG","first tag");
+        waiting.observe("ERROR","TagLostException: Tag was lost");
+        waiting.observe("RESTORED","");
+        require(!waiting.waitingForFirstTag()&&waiting.next("refresh",false)==SessionRetry.Next.STOP);
     }
 }

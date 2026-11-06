@@ -160,6 +160,10 @@ public final class PanelProtocol {
         return write(packed,powerMs,pollMs,chargeMs,DEFAULT_D4_TIMEOUT_MS,REFRESH_TIMEOUT_MS);
     }
     public boolean write(byte[] packed,int powerMs,int pollMs,int chargeMs,int d4TimeoutMs,int refreshTimeoutMs) throws Exception {
+        return write(packed,powerMs,pollMs,chargeMs,d4TimeoutMs,refreshTimeoutMs,true,null);
+    }
+    boolean write(byte[] packed,int powerMs,int pollMs,int chargeMs,int d4TimeoutMs,int refreshTimeoutMs,
+            boolean checkD1EachTime,Boolean cachedTopDown) throws Exception {
         if(packed.length!=IMAGE_BYTES)throw new IllegalArgumentException("图像必须为 105984 字节");
         if(pollMs<0||pollMs>500)throw new IllegalArgumentException("忙状态查询间隔必须为 0–500 ms");
         if(chargeMs<0||chargeMs>MAX_CHARGE_MS)throw new IllegalArgumentException("发送前充能时间必须为 0–30 秒");
@@ -173,9 +177,13 @@ public final class PanelProtocol {
             pause(chargeMs);
             control.event("WAIT_DONE","charging|"+chargeMs);
         }
-        Info initial=identify();
-        packed=PanelType.forScan(packed,initial.topDown());
-        control.event("SCAN","采用板内扫描方向="+(initial.topDown()?"01（从上到下）":"00（从下到上）")+"；不改写驱动配置");
+        boolean useCachedScan=!checkD1EachTime&&cachedTopDown!=null;
+        if(checkD1EachTime)control.event("CACHE_SCAN",""); // Invalidate the old entry until both D1 reads agree.
+        boolean topDown=useCachedScan?cachedTopDown:identify().topDown();
+        if(!checkD1EachTime&&!useCachedScan)control.event("CACHE_SCAN",topDown?"01":"00");
+        packed=PanelType.forScan(packed,topDown);
+        control.event("SCAN",(useCachedScan?"采用同一屏幕的缓存扫描方向=":"采用板内扫描方向=")
+                +(topDown?"01（从上到下）":"00（从下到上）")+"；不改写驱动配置");
         control.event("WIRE_IMAGE","实际传输 SHA-256="+toHex(java.security.MessageDigest.getInstance("SHA-256").digest(packed)));
         control.event("STAGE","authenticating|检查图像区访问权限");
         byte[] access=exchange(D8,"D8 权限查询",5000,false);
@@ -184,8 +192,11 @@ public final class PanelProtocol {
             exchange(D8,"D8 再次检查",5000,true);
         } else requireOk(access,"D8 权限查询");
         // Check the same factory profile again; no DB/DA configuration writes exist here.
-        Info rechecked=parseInfo(exchange(D1,"D1 写入前复核",5000,true));
-        if(initial.topDown()!=rechecked.topDown())throw new IllegalArgumentException("扫描配置在会话中发生变化，未传图");
+        if(checkD1EachTime){
+            Info rechecked=parseInfo(exchange(D1,"D1 写入前复核",5000,true));
+            if(topDown!=rechecked.topDown())throw new IllegalArgumentException("扫描配置在会话中发生变化，未传图");
+            control.event("CACHE_SCAN",topDown?"01":"00");
+        }
         control.event("STAGE","uploading|正在传输图片，请保持贴合");
         int confirmed=0,total=0;
         for(int offset=0;offset<packed.length;offset+=2000) {
@@ -204,6 +215,12 @@ public final class PanelProtocol {
         control.check();
         control.event("WAIT","power|"+control.now()+"|"+powerMs);
         requireOk(exchange(refresh,"D4 刷新（上电等待 "+powerMs+" ms）",d4TimeoutMs,true),"D4");
+        return pollRefresh(pollMs,refreshTimeoutMs);
+    }
+
+    boolean pollRefresh(int pollMs,int refreshTimeoutMs) throws Exception {
+        if(pollMs<0||pollMs>500)throw new IllegalArgumentException("忙状态查询间隔必须为 0–500 ms");
+        extraRefreshBudgetMs(DEFAULT_D4_TIMEOUT_MS,refreshTimeoutMs);
         long started=control.now(),deadline=started+refreshTimeoutMs;
         boolean busySeen=false;int idle=0;Boolean previous=null;
         control.event("STAGE","polling|保持贴合供能，等待屏幕刷新");
